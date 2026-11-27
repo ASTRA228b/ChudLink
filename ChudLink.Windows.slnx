@@ -1,0 +1,27 @@
+<Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/AudioControls/AudioControls.csproj" />
+    <Project Path="examples/BuildMonitor/BuildMonitor.csproj" />
+    <Project Path="examples/CrossDevice/CrossDevice.csproj" />
+    <Project Path="examples/CustomClock/CustomClock.csproj" />
+    <Project Path="examples/CustomCounter/CustomCounter.csproj" />
+    <Project Path="examples/HelloWorld/HelloWorld.csproj" />
+    <Project Path="examples/JsonStatus/JsonStatus.csproj" />
+    <Project Path="examples/SensorDashboard/SensorDashboard.csproj" />
+    <Project Path="examples/SystemMonitor/SystemMonitor.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/ChudLink.Core/ChudLink.Core.csproj" />
+    <Project Path="src/ChudLink.Desktop/ChudLink.Desktop.csproj" />
+    <Project Path="src/ChudLink.ExtensionHost/ChudLink.ExtensionHost.csproj" />
+    <Project Path="src/ChudLink.Extensions/ChudLink.Extensions.csproj" />
+    <Project Path="src/ChudLink.Host/ChudLink.Host.csproj" />
+    <Project Path="src/ChudLink.Personal/ChudLink.Personal.csproj" />
+    <Project Path="src/ChudLink.Presets/ChudLink.Presets.csproj" />
+    <Project Path="src/ChudLink.Protocol/ChudLink.Protocol.csproj" />
+    <Project Path="src/ChudLink.SDK/ChudLink.SDK.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ChudLink.Tests/ChudLink.Tests.csproj" />
+  </Folder>
+</Solution>

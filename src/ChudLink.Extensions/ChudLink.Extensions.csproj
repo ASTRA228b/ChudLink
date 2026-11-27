@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../ChudLink.SDK/ChudLink.SDK.csproj" /><PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" /></ItemGroup></Project>

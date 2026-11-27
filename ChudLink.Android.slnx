@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ChudLink.Android/ChudLink.Android.csproj" />
+    <Project Path="src/ChudLink.Protocol/ChudLink.Protocol.csproj" />
+  </Folder>
+</Solution>

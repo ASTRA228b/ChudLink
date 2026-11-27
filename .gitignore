@@ -1,0 +1,12 @@
+.tools/
+**/bin/
+**/obj/
+**/obj-*/
+**/bin-*/
+artifacts/
+.vs/
+*.user
+*.pfx
+*.keystore
+*.local.json
+TestResults/
