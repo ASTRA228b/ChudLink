@@ -1,8 +1,13 @@
-# ChudLink 0.1.0 Alpha status
+# ChudLink 0.1.1 Alpha status
 
 This release implements a working programmable companion foundation. It does **not** implement every feature in the original product specification. The concrete scope and limitations below are part of the alpha, not hidden behind placeholder controls.
 
 ## Implemented
+
+- Phone display fitting uses readable screen-width cards, adaptive columns, vertical scrolling, density-aware text and controls, larger-font spacing, and safe areas for system bars/camera cutouts. The connection label wraps within an automatically measured bar rather than a fixed physical-pixel height. Original Designer-canvas fitting remains available in Phone Settings.
+
+- Automatic host startup on an active network, automatic phone discovery, code-first Wi-Fi setup, collapsed manual fields, and numbered connection guides on both platforms. User-initiated Windows Firewall setup permits only ChudLink on private local subnets.
+- Optional USB auto-connect via authorized ADB reverse: wired-device detection, native phone app launch, pinned one-use bootstrap, first-time phone/PC confirmation, reconnect on replug, tunnel repair and owned-tunnel cleanup. A data cable, USB debugging and PC authorization are required. Production USB detection excludes emulator and wireless ADB transports.
 
 - Shared C# .NET 10 solution with all eleven requested platform projects and nine example extension projects. Separate Windows and Android solutions support independent development.
 - Self-contained Windows x64 desktop and standalone host; native Android application with minimum SDK 26, target SDK 36 and ARM32/ARM64 universal APK.
@@ -24,14 +29,14 @@ This release implements a working programmable companion foundation. It does **n
 
 - No OBS adapter, approved multi-step macro editor, microphone controls, per-application audio sessions, output-device selection, compressed sound import, custom sound-device routing or game FPS adapter.
 - GPU/VRAM/temperature providers are not bundled. Weather, calendar, external model request/inference statistics and richer ChudAI adapters need configured integrations or future providers.
-- Responsive design scales one coordinate canvas into each orientation and can letterbox. Separate breakpoint layouts, nested container layout constraints, automatic distribution, native font-file import, background-image tooling and a complete visual event graph are unfinished. The alpha has a direct event/action selector instead.
+- Phone controls now fit the screen using adaptive, scrollable cards; original canvas fitting can still letterbox when selected. Separate authored breakpoint layouts, nested container layout constraints, native font-file import, background-image tooling and a complete visual event graph are unfinished. The alpha has a direct event/action selector instead.
 - Designer desktop previews are schematic. Live publish previews on the actual phone; there is no phone framebuffer mirror. Blank/custom stations are not automatically populated with machine-specific paths or services.
 - Studio imports one C# source file, not arbitrary multi-project solutions. Visual Studio/Rider/VS Code remain available for full projects. There is no full language server, dedicated debugger, integrated NuGet manager or embedded native phone preview.
 - Custom widgets use standard declarative fallbacks. Arbitrary Android native plugins, a host-native custom renderer and advanced phone functionality require future protocol/runtime work.
 - Configuration schemas travel with packages; automatic schema-generated settings forms, package signatures and automatic extension updates are unfinished. Extensions never auto-enable at startup. Updates are explicit uninstall/reinstall.
 - Shared variables are in-memory, context rules match process names and build output currently exposes the most recent line to phone widgets (full bounded output is in host logs). There is no cloud sync or task scheduler.
 - The canvas does not yet expose individual widgets as Android accessibility virtual nodes. Phone labels/touch targets should be customized to the actual display size.
-- IPv4 private LAN operation is supported. IPv6, mDNS, USB transport and internet relay are not implemented. Discovery needs a reachable local broadcast domain; manual entry remains available.
+- IPv4 private LAN and authorized ADB USB operation are supported. IPv6, mDNS, Android Open Accessory without debugging, and internet relay are not implemented. Discovery needs a reachable local broadcast domain; manual entry remains available.
 
 ## Verification
 

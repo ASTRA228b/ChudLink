@@ -13,6 +13,7 @@ public sealed class PhoneConnection : IDisposable
     readonly SemaphoreSlim sendGate = new(1, 1);
     ClientWebSocket? socket;
     long lastReceive;
+    readonly List<string> addresses = [];
     public string DeviceId { get; }
     public string Address { get; set; }
     public string Fingerprint { get; }
@@ -21,10 +22,17 @@ public sealed class PhoneConnection : IDisposable
     public bool Connected => socket?.State == WebSocketState.Open;
     public event Action<Envelope>? Message;
     public event Action<string>? Status;
-    public PhoneConnection(string id, string address, string fingerprint, string token)
+    public PhoneConnection(string id, string address, string fingerprint, string token, IEnumerable<string>? alternatives = null)
     {
         DeviceId = id; Address = NormalizeAddress(address); Fingerprint = NormalizeFingerprint(fingerprint); Token = token;
         if (Fingerprint.Length != 64 || !Fingerprint.All(Uri.IsHexDigit)) throw new InvalidDataException("Enter the complete SHA-256 fingerprint shown on the PC");
+        addresses.Add(Address);
+        foreach (var alternative in alternatives ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(alternative)) continue;
+            var normalized = NormalizeAddress(alternative);
+            if (!addresses.Contains(normalized)) addresses.Add(normalized);
+        }
     }
     public static string NormalizeAddress(string value)
     {
@@ -42,7 +50,7 @@ public sealed class PhoneConnection : IDisposable
         CryptographicOperations.FixedTimeEquals(SHA256.HashData(cert.GetRawCertData()), Convert.FromHexString(Fingerprint));
     public HttpClient Client()
     {
-        var handler = new SocketsHttpHandler { SslOptions = new() { RemoteCertificateValidationCallback = (_, certificate, _, _) => Validate(certificate) } };
+        var handler = new SocketsHttpHandler { UseProxy = false, SslOptions = new() { RemoteCertificateValidationCallback = (_, certificate, _, _) => Validate(certificate) } };
         return new(handler) { BaseAddress = new Uri(Address), Timeout = TimeSpan.FromSeconds(10) };
     }
     public async Task<string> PairAsync(string code, string name, string platform, CancellationToken ct)
@@ -72,18 +80,29 @@ public sealed class PhoneConnection : IDisposable
         {
             try
             {
+                if (attempt > 0 && attempt % (addresses.Count * 2) == 0)
+                {
+                    try
+                    {
+                        foreach (var found in await DiscoverAsync(ct))
+                            if (NormalizeFingerprint(found.Fingerprint) == Fingerprint && !addresses.Contains(found.Address)) addresses.Add(found.Address);
+                    }
+                    catch (Exception ex) when (ex is SocketException or IOException) { /* Keep trying saved, pinned endpoints. */ }
+                }
+                Address = addresses[attempt % addresses.Count];
                 using var ws = new ClientWebSocket(); socket = ws;
+                ws.Options.Proxy = null;
                 ws.Options.RemoteCertificateValidationCallback = (_, cert, _, _) => Validate(cert);
                 ws.Options.SetRequestHeader("Authorization", "Bearer " + Token); ws.Options.SetRequestHeader("X-ChudLink-Protocol", Wire.Version.ToString());
                 ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
-                Status?.Invoke("Connecting securely…");
+                Status?.Invoke(new Uri(Address).IsLoopback ? "Connecting over USB…" : "Connecting to your PC over Wi-Fi…");
                 using (var connecting = CancellationTokenSource.CreateLinkedTokenSource(ct))
                 {
-                    connecting.CancelAfter(TimeSpan.FromSeconds(12));
+                    connecting.CancelAfter(TimeSpan.FromSeconds(5));
                     await ws.ConnectAsync(new Uri(Address.Replace("https://", "wss://") + "/connect"), connecting.Token);
                 }
                 Interlocked.Exchange(ref lastReceive, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-                attempt = 0; Status?.Invoke("CONNECTED"); await SendAsync("hello", hello(), ct);
+                attempt = 0; Status?.Invoke(new Uri(Address).IsLoopback ? "CONNECTED · USB" : "CONNECTED · WI-FI"); await SendAsync("hello", hello(), ct);
                 using var session = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 var heartbeat = HeartbeatsAsync(hello, session.Token);
                 try
@@ -109,9 +128,9 @@ public sealed class PhoneConnection : IDisposable
                 finally { session.Cancel(); try { await heartbeat; } catch (OperationCanceledException) { } }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception ex) { Status?.Invoke("OFFLINE · " + ex.Message); }
+            catch (Exception) { Status?.Invoke("Reconnecting automatically… Check the USB cable or that the PC host is running."); }
             finally { socket = null; }
-            await Task.Delay(Math.Min(15000, 1000 * (1 << Math.Min(attempt++, 4))), ct);
+            await Task.Delay(Math.Min(5000, 750 * (1 << Math.Min(attempt++, 3))), ct);
         }
     }
     async Task HeartbeatsAsync(Func<DeviceHello> hello, CancellationToken ct)
@@ -147,8 +166,15 @@ public sealed class PhoneConnection : IDisposable
             {
                 var packet = await udp.ReceiveAsync(timeout.Token);
                 if (packet.Buffer.Length > 2048) continue;
-                var reply = Wire.Parse<DiscoveryReply>(Encoding.UTF8.GetString(packet.Buffer));
-                if (reply.Protocol == Wire.Version && !results.Any(r => r.Address == reply.Address)) results.Add(reply);
+                if (!Private(packet.RemoteEndPoint.Address)) continue;
+                try
+                {
+                    var reply = Wire.Parse<DiscoveryReply>(Encoding.UTF8.GetString(packet.Buffer));
+                    var normalized = NormalizeAddress(reply.Address); var pin = NormalizeFingerprint(reply.Fingerprint);
+                    if (reply.Protocol == Wire.Version && reply.Name.Length is > 0 and <= 80 && pin.Length == 64 && pin.All(Uri.IsHexDigit) && !results.Any(r => r.Address == normalized))
+                        results.Add(reply with { Address = normalized, Fingerprint = pin });
+                }
+                catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidDataException or ArgumentException or NullReferenceException) { /* Ignore unrelated or malformed broadcast traffic. */ }
             }
         }
         catch (OperationCanceledException) { }

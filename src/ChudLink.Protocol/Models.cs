@@ -6,8 +6,11 @@ namespace ChudLink.Protocol;
 public static class Wire
 {
     public const int Version = 1;
+    public const string AppVersion = "0.1.1-alpha";
+    public const string DisplayVersion = "0.1.1 Alpha";
     public const int Port = 47831;
     public const int DiscoveryPort = 47832;
+    public const string UsbAddress = "https://127.0.0.1:47831";
     public const string DiscoveryQuery = "CHUDLINK_DISCOVER_V1";
     public static JsonSerializerOptions Json { get; } = new(JsonSerializerDefaults.Web)
     {

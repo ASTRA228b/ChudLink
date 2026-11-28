@@ -2,22 +2,28 @@
 
 ![ChudLink companion concept artwork](assets/branding/chudlink-companions.png)
 
-**0.1.0 Alpha** · Native C# PC companions · Windows 10/11 · Android API 26+
+**0.1.1 Alpha** · Native C# PC companions · Windows 10/11 · Android API 26+
 
 ChudLink connects Android phones to a Windows PC over an authenticated, certificate-pinned local connection. The native WPF desktop manages devices, dashboards, visual editing, C# development and explicitly enabled extension workers. The native .NET Android app draws declarative dashboards directly onto an Android canvas; dashboard changes do not require another APK.
 
 This is a working alpha with a deliberately limited feature set. Read [feature status](docs/STATUS.md) for implemented behavior and remaining work. Decorative artwork is generated concept art, not a screenshot.
 
+## Downloads
+
+Get the Windows x64 ZIP and Android APK from the [0.1.1 Alpha release](https://github.com/ASTRA228b/ChudLink/releases/tag/v0.1.1-alpha). See [release notes](docs/RELEASE-0.1.1.md), [performance evidence](docs/PERFORMANCE.md), and the separate [Linux/macOS drafts](docs/PORTABLE-DRAFTS.md).
+
 ## Test immediately
 
 1. Open `artifacts/windows/ChudLink.Desktop.exe` from this build. Keep the entire directory together. The self-contained distribution includes .NET; it needs no runtime install.
-2. In **Overview**, select your private LAN IPv4 address and choose **Start host**. The app binds only that address. If Windows Firewall prompts, allow the app on your **private** network. An optional administrator-run `scripts/firewall.ps1` creates rules scoped to this app and the local subnet.
-3. Copy `artifacts/android/ChudLink-0.1.0-Alpha.apk` to the phone and open it. Allow APK installation from the file manager used to open it. No root, developer options or USB debugging is required for normal installation.
-4. Put the PC and phone on the same trusted Wi-Fi/LAN. In **Devices**, generate a pairing code. On the phone, use discovery or enter the displayed HTTPS address and complete SHA-256 fingerprint. Compare **every character** against the desktop. Enter the expiring code.
+2. The PC host starts automatically on an active private network. Open **Devices** for the Wi-Fi pairing code. If discovery is blocked, click **Allow Wi-Fi connection** and approve Windows' administrator prompt. Rules are scoped to ChudLink, Private networks and the local subnet.
+3. Copy `artifacts/android/ChudLink-0.1.1-Alpha.apk` to the phone and open it. Allow APK installation from the file manager used to open it. No root, developer options or USB debugging is required for normal installation.
+4. Put both devices on the same trusted Wi-Fi/LAN. The phone finds PCs automatically. Select yours, enter the six-digit code, and confirm its fingerprint matches the PC. No address or fingerprint typing is needed when discovery succeeds.
 5. Select the pending phone on the desktop and approve it. The default Hardware Station appears with real memory, CPU, storage and network samples.
 6. Assign Control Deck and tap **Shared counter** to confirm a button round trip. Media controls work when media is playing. For C# actions, enable **Approved PC actions** on that phone; then build and run the Hello World template in Developer Studio and assign its dashboard.
 
 Discovery is untrusted convenience. It never replaces fingerprint verification. Pairing codes expire after two minutes, are one use, and require explicit host approval. Credentials can be revoked in Devices. No account or cloud service is required.
+
+Prefer a cable? Click **Devices > Connect by USB**, enable Android USB debugging once, and authorize your PC with a USB data cable. ChudLink opens automatically. Confirm the PC and approve the phone once; future replugging reconnects without typing. USB mode requires debugging; Wi-Fi does not. Both apps include a numbered **Connection guide**. See [USB setup](docs/INSTALL.md#usb-pair-once-then-plug-in).
 
 ## Source build
 

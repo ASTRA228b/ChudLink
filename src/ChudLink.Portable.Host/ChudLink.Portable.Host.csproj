@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../ChudLink.Core/ChudLink.Core.csproj" />
+    <ProjectReference Include="../ChudLink.Presets/ChudLink.Presets.csproj" />
+    <ProjectReference Include="../ChudLink.SDK/ChudLink.SDK.csproj" />
+    <Compile Include="../ChudLink.Host/HostRuntime.cs" Link="Shared/HostRuntime.cs" />
+    <Compile Include="../ChudLink.Host/Store.cs" Link="Shared/Store.cs" />
+  </ItemGroup>
+</Project>

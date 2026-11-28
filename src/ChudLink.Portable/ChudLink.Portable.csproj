@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ChudLink.Portable</AssemblyName>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <PublishTrimmed>false</PublishTrimmed>
+    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../ChudLink.Portable.Host/ChudLink.Portable.Host.csproj" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />
+    <None Include="../../assets/branding/chudlink-logo-v2.png" Link="Assets/ChudLink.png" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="../ChudLink.Android/PhoneConnection.cs" Link="Shared/PhoneConnection.cs" />
+  </ItemGroup>
+</Project>

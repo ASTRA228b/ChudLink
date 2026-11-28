@@ -40,27 +40,17 @@ public sealed class WorkerManager(HostRuntime host) : IAsyncDisposable
         await InputAsync(instance, "settings", host.Store.Read<Dictionary<string, string>>("extension-" + manifest.Id + ".json") ?? []);
         await DevicesChangedAsync(); host.Log($"Started trusted worker {manifest.Name} (256 MB, 20% CPU, 4 h timeout; NOT sandboxed)");
     }
-    static async Task<string?> BoundedLineAsync(StreamReader reader)
-    {
-        var chars = new char[1]; var text = new System.Text.StringBuilder();
-        while (await reader.ReadAsync(chars) != 0)
-        {
-            if (chars[0] == '\n') return text.ToString().TrimEnd('\r');
-            if (text.Length >= 256 * 1024) throw new InvalidDataException("Worker line exceeds 256 KB");
-            text.Append(chars[0]);
-        }
-        return text.Length > 0 ? text.ToString() : null;
-    }
     async Task ReadErrorsAsync(Running worker)
     {
-        try { while (await BoundedLineAsync(worker.Process.StandardError) is { } line) host.Log($"[{worker.Manifest.Id}] {line[..Math.Min(line.Length, 2000)]}"); }
+        try { var lines = new BoundedLineReader(worker.Process.StandardError); while (await lines.ReadAsync() is { } line) host.Log($"[{worker.Manifest.Id}] {line[..Math.Min(line.Length, 2000)]}"); }
         catch (Exception ex) { host.Log("Worker console: " + ex.Message); }
     }
     async Task ReadAsync(Running w)
     {
         try
         {
-            while (await BoundedLineAsync(w.Process.StandardOutput) is { } line)
+            var lines = new BoundedLineReader(w.Process.StandardOutput);
+            while (await lines.ReadAsync() is { } line)
             {
                 if ((DateTimeOffset.UtcNow - w.Window).TotalSeconds > 1) { w.Window = DateTimeOffset.UtcNow; w.MessageCount = 0; }
                 if (++w.MessageCount > 100) throw new InvalidDataException("Worker message rate exceeded");

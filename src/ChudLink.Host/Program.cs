@@ -1,3 +1,5 @@
+using ChudLink.Protocol;
+
 namespace ChudLink.Host;
 
 public static class Program
@@ -6,7 +8,7 @@ public static class Program
     {
         var address = args.Length > 0 ? args[0] : "127.0.0.1";
         await using var host = new HostRuntime(); await host.StartAsync(address);
-        Console.WriteLine($"ChudLink 0.1.0 Alpha\n{host.Address}\nSHA256 {host.Fingerprint}\nCommands: pair, pending, approve <ticket>, deny <ticket>, devices, revoke <id>, quit");
+        Console.WriteLine($"ChudLink {Wire.DisplayVersion}\n{host.Address}\nSHA256 {host.Fingerprint}\nCommands: pair, pending, approve <ticket>, deny <ticket>, devices, revoke <id>, quit");
         while (Console.ReadLine() is { } line)
         {
             var cmd = line.Split(' ', 2);

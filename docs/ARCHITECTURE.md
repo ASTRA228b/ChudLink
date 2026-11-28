@@ -2,7 +2,7 @@
 
 The desktop embeds HostRuntime. The standalone console embeds the same implementation. A per-data-directory file lock prevents both from operating on the same state simultaneously. Store persists settings/devices atomically, dashboards as .chudlink JSON and a stable self-signed RSA certificate. Closing WPF hides to tray; quitting disposes the host and extension workers.
 
-The Android companion uses native Android views for setup/settings and a C# Canvas view for dashboards, with no WebView or MAUI dependency. Dashboard coordinates are scaled uniformly into the available screen; portrait/landscape changes preserve layout and can letterbox. Resolution presets in Designer rescale the design. Independent portrait/landscape breakpoint compositions are a future extension.
+The Android companion uses native Android views for setup/settings and a C# Canvas view for dashboards, with no WebView or MAUI dependency. By default, phone dashboards arrange readable cards using the available density-independent width: one column on narrow phones, additional columns on wider screens, and vertical scrolling rather than shrinking every widget. The same placements drive drawing, scrolling and touch hit testing. Android font scale is respected; the connection bar uses dp sizing with a wrapping 14sp label and a 48dp settings target. A safe-area frame accounts for system bars and display cutouts. Phone Settings can disable automatic fitting to retain the original uniformly scaled Designer canvas, containers and layers. Automatic fitting never changes the stored dashboard. Independent authored breakpoint compositions remain future work.
 
 ## Wire protocol v1
 
@@ -20,6 +20,10 @@ The initial dashboard is declarative. Subsequent widget patches identify only ch
 Discovery sends CHUDLINK_DISCOVER_V1 to UDP 47832; a private-subnet host replies with name, HTTPS address, SHA-256 pin and protocol. Replies are not authenticated; first pairing explicitly depends on comparing the complete fingerprint on both screens. Discovery failure has no effect on manual connection.
 
 ## Extensibility
+
+USB mode uses authorized Android Platform Tools rather than a second dashboard protocol. The optional Windows watcher accepts physical USB transports only (test code can explicitly include emulators), creates `adb reverse tcp:47831 tcp:<host-port>`, and launches the phone's stable `ai.chud.chudlink/.MainActivity` with a fingerprint, LAN fallback and short-lived bootstrap secret. The phone uses the same pinned HTTPS/WSS client at loopback. Bootstrap secrets are one-use, 256-bit, expire after two minutes, and are rejected on LAN requests; first-time approval remains local to the PC. An existing pinned credential reconnects without pairing again. The watcher restores missing tunnels, launches once per attachment/repair, reports unauthorized/offline/missing-APK conditions, ignores wireless ADB, and removes only its own mappings when disabled. The PC app restores its existing window when launched again instead of making the user find its tray icon.
+
+Phone setup searches automatically. Discovered endpoints are validated and displayed as choices; manual fields are collapsed. First-time identity confirmation remains explicit. Reconnect may try a saved LAN fallback or discover a changed address only for the already-pinned certificate. Desktop automatic startup prefers a usable private network over a stale loopback setting. Numbered guides and a user-initiated, administrator-approved private-subnet firewall helper are part of the connection UI.
 
 The SDK is independent of transport. Builders create portable dashboards; IChudContext emits dashboard registrations, patches, actions, providers, notifications and mesh commands through bounded JSON lines. Custom widget registration supplies a standard declarative fallback; this alpha does not load arbitrary native phone renderers. There is no Android assembly loading or game injection.
 

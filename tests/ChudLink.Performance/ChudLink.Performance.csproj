@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><PerfBinaries Condition="'$(PerfBinaries)' == ''">../../src/ChudLink.Host/bin/Release/net10.0-windows</PerfBinaries></PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Reference Include="$(PerfBinaries)/ChudLink.Host.dll" /><Reference Include="$(PerfBinaries)/ChudLink.Core.dll" /><Reference Include="$(PerfBinaries)/ChudLink.Protocol.dll" />
+    <Compile Include="../../src/ChudLink.Android/PhoneConnection.cs" Link="PhoneConnection.cs" />
+  </ItemGroup>
+</Project>

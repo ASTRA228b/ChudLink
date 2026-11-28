@@ -4,14 +4,26 @@ namespace ChudLink.Host;
 
 public static class WindowsActions
 {
+    static readonly object foregroundGate = new();
+    static uint lastForegroundPid;
+    static string? lastForegroundName;
+    static long nextForegroundRefresh;
     [DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, nuint extra);
     [DllImport("user32.dll")] static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(nint window, out uint process);
     [DllImport("winmm.dll", CharSet = CharSet.Unicode)] static extern bool PlaySound(string? sound, nint module, uint flags);
     public static string? ForegroundProcess()
     {
-        GetWindowThreadProcessId(GetForegroundWindow(), out var pid);
-        try { using var process = System.Diagnostics.Process.GetProcessById((int)pid); return process.ProcessName; } catch (ArgumentException) { return null; }
+        var window = GetForegroundWindow();
+        if (window == 0 || GetWindowThreadProcessId(window, out var pid) == 0 || pid == 0) return null;
+        lock (foregroundGate)
+        {
+            var now = Environment.TickCount64;
+            if (pid == lastForegroundPid && now < nextForegroundRefresh) return lastForegroundName;
+            lastForegroundPid = pid; lastForegroundName = null; nextForegroundRefresh = now + 1000;
+            try { using var process = System.Diagnostics.Process.GetProcessById((int)pid); return lastForegroundName = process.ProcessName; }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return null; }
+        }
     }
     public static void Media(string key)
     {
@@ -29,12 +41,23 @@ public static class WindowsActions
     public static void Sound(string path) { if (path.Length == 0) PlaySound(null, 0, 0); else if (!PlaySound(path, 0, 0x00020000 | 0x0001 | 0x0002)) throw new IOException("Unable to play WAV"); }
     static IAudioEndpointVolume VolumeEndpoint()
     {
-        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(0, 1, out var device));
-        var iid = typeof(IAudioEndpointVolume).GUID;
-        Marshal.ThrowExceptionForHR(device.Activate(ref iid, 23, 0, out var endpoint));
-        Marshal.ReleaseComObject(device); Marshal.ReleaseComObject(enumerator);
-        return (IAudioEndpointVolume)endpoint;
+        IMMDeviceEnumerator? enumerator = null; IMMDevice? device = null; object? endpoint = null;
+        try
+        {
+            enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+            Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(0, 1, out device));
+            var iid = typeof(IAudioEndpointVolume).GUID;
+            Marshal.ThrowExceptionForHR(device.Activate(ref iid, 23, 0, out endpoint));
+            var volume = (IAudioEndpointVolume)endpoint; endpoint = null; return volume;
+        }
+        finally
+        {
+            // All intermediate RCWs must be released even when no audio device is available
+            // or activation fails. The returned endpoint remains owned by its caller.
+            if (endpoint != null) Marshal.ReleaseComObject(endpoint);
+            if (device != null) Marshal.ReleaseComObject(device);
+            if (enumerator != null) Marshal.ReleaseComObject(enumerator);
+        }
     }
     public static float GetVolume() { var endpoint = VolumeEndpoint(); try { Marshal.ThrowExceptionForHR(endpoint.GetMasterVolumeLevelScalar(out var volume)); return volume; } finally { Marshal.ReleaseComObject(endpoint); } }
     public static void SetVolume(float volume) { var endpoint = VolumeEndpoint(); try { Marshal.ThrowExceptionForHR(endpoint.SetMasterVolumeLevelScalar(Math.Clamp(volume, 0, 1), Guid.Empty)); } finally { Marshal.ReleaseComObject(endpoint); } }

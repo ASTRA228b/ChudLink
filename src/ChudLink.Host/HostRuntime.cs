@@ -37,17 +37,22 @@ public sealed class HostRuntime : IAsyncDisposable
     public ConcurrentDictionary<string, string> ProviderValues { get; } = new();
     public ConcurrentDictionary<string, Widget> CustomWidgets { get; } = new();
     public WorkerManager Workers { get; }
+    public UsbAutoConnect Usb { get; }
+    readonly Dictionary<string, DateTimeOffset> usbCodes = new();
     readonly ConcurrentDictionary<string, Connection> connections = new();
     readonly ConcurrentDictionary<string, DateTimeOffset> overrides = new();
     readonly ConcurrentDictionary<string, string> activeContexts = new();
     readonly ConcurrentDictionary<string, string> patchCache = new();
     readonly CancellationTokenSource stop = new();
+    readonly SemaphoreSlim activity = new(0, 1);
     readonly object sync = new();
     readonly SemaphoreSlim buildGate = new(1, 1);
     WebApplication? app;
     FileStream? instanceLock;
     System.Security.Cryptography.X509Certificates.X509Certificate2? certificate;
-    Task? discovery, telemetry;
+    Task? discovery, telemetry, services;
+    public bool OverviewTelemetryRequested { get; set; }
+    public long TelemetrySamples;
     string code = "";
     DateTimeOffset codeExpires;
     public string PairingCode => DateTimeOffset.UtcNow < codeExpires ? code : "Expired — generate a new code";
@@ -56,16 +61,29 @@ public sealed class HostRuntime : IAsyncDisposable
     public bool Running => app != null;
     public long BytesSent, BytesReceived, UpdatesSent;
     public Dictionary<string, (string Text, double Value)> Latest { get; private set; } = new();
-    public HostRuntime(string? dataRoot = null) { Store = new(dataRoot); Workers = new(this); }
+    public HostRuntime(string? dataRoot = null) { Store = new(dataRoot); Workers = new(this); Usb = new(this); }
     public void Log(string message) => Logs.Add($"{DateTime.Now:HH:mm:ss}  {message[..Math.Min(message.Length, 4000)]}");
     public DeviceRecord[] Devices() { lock (sync) return Store.Devices.ToArray(); }
     public string NewPairingCode()
     {
         lock (sync) { code = RandomNumberGenerator.GetInt32(100000, 1000000).ToString(); codeExpires = DateTimeOffset.UtcNow.AddMinutes(2); return code; }
     }
+    public string NewUsbPairingCode()
+    {
+        lock (sync)
+        {
+            foreach (var key in usbCodes.Where(p => p.Value <= DateTimeOffset.UtcNow).Select(p => p.Key).ToArray()) usbCodes.Remove(key);
+            if (usbCodes.Count >= 32) throw new InvalidOperationException("Too many pending USB connections. Try again in two minutes.");
+            var secret = Credentials.NewToken(); usbCodes[secret] = DateTimeOffset.UtcNow.AddMinutes(2); return secret;
+        }
+    }
     public async Task StartAsync(string address, int? port = null)
     {
-        if (Running) return;
+        if (Running)
+        {
+            if (new Uri(Address).Host != address) throw new InvalidOperationException($"The host is already running on {Address}. Quit and reopen ChudLink to use the current network; startup selects an active adapter automatically.");
+            return;
+        }
         var ip = IPAddress.Parse(address);
         if (!LocalNetwork.Addresses().Contains(ip) || !LocalNetwork.IsPrivate(ip)) throw new InvalidOperationException("Select a local private IPv4 interface");
         instanceLock = new FileStream(Path.Combine(Store.Root, "host.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -75,7 +93,12 @@ public sealed class HostRuntime : IAsyncDisposable
             Fingerprint = Convert.ToHexString(SHA256.HashData(cert.RawData));
             var builder = WebApplication.CreateSlimBuilder();
             builder.Logging.ClearProviders();
-            builder.WebHost.ConfigureKestrel(k => { k.Limits.MaxRequestBodySize = 16 * 1024; k.Listen(ip, port ?? Store.Settings.Port, l => l.UseHttps(cert)); });
+            builder.WebHost.ConfigureKestrel(k =>
+            {
+                k.Limits.MaxRequestBodySize = 16 * 1024;
+                k.Listen(ip, port ?? Store.Settings.Port, l => l.UseHttps(cert));
+                if (!IPAddress.IsLoopback(ip)) k.Listen(IPAddress.Loopback, port ?? Store.Settings.Port, l => l.UseHttps(cert));
+            });
             builder.Services.AddRateLimiter(options =>
             {
                 options.RejectionStatusCode = 429;
@@ -90,16 +113,19 @@ public sealed class HostRuntime : IAsyncDisposable
                 catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException or ArgumentException) { ctx.Response.StatusCode = 400; }
             });
             web.UseRateLimiter(); web.UseWebSockets(new() { KeepAliveInterval = TimeSpan.FromSeconds(20) });
-            web.MapGet("/health", () => new { app = "ChudLink", version = "0.1.0-alpha", protocol = Wire.Version });
-            web.MapPost("/pair", (PairRequest request) =>
+            web.MapGet("/health", () => new { app = "ChudLink", version = Wire.AppVersion, protocol = Wire.Version });
+            web.MapPost("/pair", (PairRequest request, HttpContext context) =>
             {
                 lock (sync)
                 {
                     if (request.Protocol != Wire.Version) return Results.BadRequest(new { error = "Unsupported protocol" });
-                    if (DateTimeOffset.UtcNow >= codeExpires || request.Code != code || request.DeviceId.Length is < 16 or > 100 || request.Name.Length is < 1 or > 80 || request.Platform.Length > 80 || Pairings.Count > 16)
+                    var usb = context.Connection.RemoteIpAddress is { } remote && IPAddress.IsLoopback(remote) && usbCodes.TryGetValue(request.Code, out var expires) && expires > DateTimeOffset.UtcNow;
+                    var manual = DateTimeOffset.UtcNow < codeExpires && request.Code == code;
+                    if ((!usb && !manual) || request.DeviceId.Length is < 16 or > 100 || request.Name.Length is < 1 or > 80 || request.Platform.Length > 80 || Pairings.Count > 16)
                         return Results.BadRequest(new { error = "Invalid or expired pairing request" });
                     var pending = new PendingPair { Request = request };
-                    Pairings[pending.Ticket] = pending; codeExpires = DateTimeOffset.MinValue; // one use
+                    Pairings[pending.Ticket] = pending;
+                    if (usb) usbCodes.Remove(request.Code); else codeExpires = DateTimeOffset.MinValue;
                     Log($"Pair request: {request.Name}. Awaiting local approval.");
                     return Results.Json(new PairTicket(pending.Ticket, pending.Status), Wire.Json);
                 }
@@ -119,7 +145,8 @@ public sealed class HostRuntime : IAsyncDisposable
             await web.StartAsync(); app = web;
             Address = $"https://{ip}:{port ?? Store.Settings.Port}";
             Store.Settings.Address = address; Store.Save();
-            discovery = DiscoverAsync(ip, stop.Token); telemetry = TelemetryLoopAsync(stop.Token);
+            if (Store.Settings.UsbAutoConnect) Usb.Start();
+            discovery = DiscoverAsync(ip, stop.Token); telemetry = TelemetryLoopAsync(stop.Token); services = ServiceLoopAsync(stop.Token);
             Log($"Listening on {Address}");
         }
         catch { certificate?.Dispose(); certificate = null; instanceLock.Dispose(); instanceLock = null; throw; }
@@ -194,6 +221,7 @@ public sealed class HostRuntime : IAsyncDisposable
         var connection = new Connection(ws);
         if (connections.TryRemove(device.Id, out var old)) old.Socket.Abort();
         connections[device.Id] = connection;
+        try { activity.Release(); } catch (SemaphoreFullException) { }
         device.Connected = true; device.LastSeen = DateTimeOffset.UtcNow; ClearPatchCache(device.Id);
         try
         {
@@ -335,8 +363,7 @@ public sealed class HostRuntime : IAsyncDisposable
     }
     async Task TelemetryLoopAsync(CancellationToken ct)
     {
-        var sampler = new Telemetry(); int iteration = 0;
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+        using var sampler = new Telemetry(); int iteration = 0;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -345,31 +372,19 @@ public sealed class HostRuntime : IAsyncDisposable
                 if (iteration % 10 == 0) await Workers.CheckLimitsAsync();
                 if (connections.Count > 0)
                 {
-                    Latest = sampler.Sample();
-                    if (iteration % 10 == 0)
-                    {
-                        foreach (var endpoint in Store.Settings.Endpoints.Take(16).ToArray())
-                        {
-                            try
-                            {
-                                if (!Uri.TryCreate(endpoint.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("https" or "http")) continue;
-                                using var response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct);
-                                var value = $"{endpoint.Name}: {(int)response.StatusCode}";
-                                if (response.IsSuccessStatusCode && endpoint.JsonProperty is { Length: > 0 })
-                                {
-                                    await using var input = await response.Content.ReadAsStreamAsync(ct); var bytes = new byte[65537]; var count = 0;
-                                    while (count < bytes.Length) { var n = await input.ReadAsync(bytes.AsMemory(count), ct); if (n == 0) break; count += n; }
-                                    if (count > 65536) throw new InvalidDataException("JSON response exceeds 64 KB");
-                                    using var json = System.Text.Json.JsonDocument.Parse(bytes.AsMemory(0, count));
-                                    if (json.RootElement.TryGetProperty(endpoint.JsonProperty, out var property)) value = $"{endpoint.Name}: {property}";
-                                }
-                                ProviderValues["service." + endpoint.Id] = value;
-                            }
-                            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested) { ProviderValues["service." + endpoint.Id] = endpoint.Name + ": unavailable"; }
-                        }
-                        ProviderValues["service.summary"] = Store.Settings.Endpoints.Count == 0 ? "No services configured" : string.Join("\n", ProviderValues.Where(p => p.Key.StartsWith("service.") && p.Key != "service.summary").Select(p => p.Value));
-                    }
-                    foreach (var device in Devices().Where(d => d.Connected))
+                    var devices = Devices().Where(d => d.Connected).ToArray();
+                    var due = devices.Where(d => iteration % (d.Info?.Profile switch { RenderProfile.Legacy => 5, RenderProfile.Performance => 1, _ => 2 }) == 0).ToArray();
+                    var required = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var device in due)
+                        if (Store.Dashboards.TryGetValue(device.DashboardId, out var board))
+                            foreach (var widget in board.Pages.SelectMany(p => p.Widgets))
+                                if (widget.DataKey is { } key && (key.StartsWith("host.", StringComparison.Ordinal) || key == "audio.volume")) required.Add(key);
+                    if (OverviewTelemetryRequested) { required.Add("host.cpu"); required.Add("host.ram"); }
+                    if (required.Count > 0) { Latest = sampler.Sample(required); Interlocked.Increment(ref TelemetrySamples); }
+                    ContextRule[] contextRules;
+                    lock (Store.Settings.ContextRules) contextRules = Store.Settings.ContextRules.ToArray();
+                    var foreground = contextRules.Length > 0 ? WindowsActions.ForegroundProcess() : null;
+                    foreach (var device in devices)
                     {
                         if (!connections.TryGetValue(device.Id, out var connection)) continue;
                         if ((DateTimeOffset.UtcNow - connection.LastHeartbeat).TotalSeconds > 65) { connection.Socket.Abort(); continue; }
@@ -392,28 +407,71 @@ public sealed class HostRuntime : IAsyncDisposable
                             if (patches.Count > 0) { await SendAsync(device.Id, "patch", patches); Interlocked.Add(ref UpdatesSent, patches.Count); }
                         }
                         if (iteration % 10 == 0) await SendAsync(device.Id, "ping", new { sent = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
-                        var process = WindowsActions.ForegroundProcess();
+                        var process = foreground;
                         if (process != null && (!overrides.TryGetValue(device.Id, out var until) || until < DateTimeOffset.UtcNow))
                         {
-                            var rule = Store.Settings.ContextRules.FirstOrDefault(r => string.Equals(r.Process, process, StringComparison.OrdinalIgnoreCase) && (r.DeviceId == null || r.DeviceId == device.Id));
+                            var rule = contextRules.FirstOrDefault(r => string.Equals(r.Process, process, StringComparison.OrdinalIgnoreCase) && (r.DeviceId == null || r.DeviceId == device.Id));
                             if (rule != null && (!activeContexts.TryGetValue(device.Id, out var context) || context != process)) { await AssignAsync(device.Id, rule.DashboardId, false); activeContexts[device.Id] = process; }
                             if (rule == null) activeContexts.TryRemove(device.Id, out _);
                         }
                     }
                 }
-                iteration++; await Task.Delay(1000, ct);
+                iteration++;
+                if (connections.IsEmpty && Workers.Active.Length == 0) await activity.WaitAsync(TimeSpan.FromSeconds(5), ct);
+                else await Task.Delay(1000, ct);
             }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log("Telemetry stopped: " + ex); }
     }
+    async Task ServiceLoopAsync(CancellationToken ct)
+    {
+        using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                if (!connections.IsEmpty)
+                {
+                    ServiceEndpoint[] endpoints;
+                    lock (Store.Settings.Endpoints) endpoints = Store.Settings.Endpoints.Take(16).ToArray();
+                    await Parallel.ForEachAsync(endpoints, new ParallelOptions { MaxDegreeOfParallelism = 2, CancellationToken = ct }, async (endpoint, cancellation) =>
+                    {
+                        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation); deadline.CancelAfter(TimeSpan.FromSeconds(3)); var requestCt = deadline.Token;
+                        try
+                        {
+                            if (!Uri.TryCreate(endpoint.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("https" or "http")) return;
+                            using var response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, requestCt);
+                            var value = $"{endpoint.Name}: {(int)response.StatusCode}";
+                            if (response.IsSuccessStatusCode && endpoint.JsonProperty is { Length: > 0 })
+                            {
+                                await using var input = await response.Content.ReadAsStreamAsync(requestCt); var bytes = new byte[65537]; var count = 0;
+                                while (count < bytes.Length) { var n = await input.ReadAsync(bytes.AsMemory(count), requestCt); if (n == 0) break; count += n; }
+                                if (count > 65536) throw new InvalidDataException("JSON response exceeds 64 KB");
+                                using var json = System.Text.Json.JsonDocument.Parse(bytes.AsMemory(0, count));
+                                if (json.RootElement.TryGetProperty(endpoint.JsonProperty, out var property)) value = $"{endpoint.Name}: {property}";
+                            }
+                            ProviderValues["service." + endpoint.Id] = value;
+                        }
+                        catch (Exception) when (!cancellation.IsCancellationRequested) { ProviderValues["service." + endpoint.Id] = endpoint.Name + ": unavailable"; }
+                    });
+                    ProviderValues["service.summary"] = endpoints.Length == 0 ? "No services configured" : string.Join("\n", endpoints.Select(e => ProviderValues.GetValueOrDefault("service." + e.Id, e.Name + ": checking")));
+                }
+                await Task.Delay(10000, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) { Log("Service checks stopped: " + ex.Message); }
+    }
     public async ValueTask DisposeAsync()
     {
+        await Usb.DisposeAsync();
         await stop.CancelAsync();
         foreach (var c in connections.Values) c.Socket.Abort();
         await Workers.DisposeAsync();
         if (app != null) { await app.StopAsync(); await app.DisposeAsync(); app = null; }
         if (telemetry != null) await telemetry; if (discovery != null) await discovery;
-        Store.Save(); instanceLock?.Dispose(); certificate?.Dispose(); stop.Dispose();
+        if (services != null) await services;
+        Store.Save(); instanceLock?.Dispose(); certificate?.Dispose(); activity.Dispose(); stop.Dispose();
     }
 }

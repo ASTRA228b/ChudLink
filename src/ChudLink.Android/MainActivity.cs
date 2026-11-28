@@ -14,7 +14,7 @@ using OperationCanceledException = System.OperationCanceledException;
 
 namespace ChudLink.Phone;
 
-[Activity(Label = "ChudLink", MainLauncher = true, Exported = true, ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.KeyboardHidden)]
+[Activity(Name = "ai.chud.chudlink.MainActivity", Label = "ChudLink", MainLauncher = true, Exported = true, LaunchMode = LaunchMode.SingleTop, ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.KeyboardHidden)]
 public sealed class MainActivity : Activity, ISensorEventListener
 {
     global::Android.Content.ISharedPreferences prefs = null!;
@@ -23,6 +23,8 @@ public sealed class MainActivity : Activity, ISensorEventListener
     DashboardView? view;
     PhoneConnection? connection;
     CancellationTokenSource? session;
+    CancellationTokenSource? setup;
+    bool pairing;
     readonly CancellationTokenSource lifetime = new();
     bool dashboardVisible, resumed;
     bool thermalLimited;
@@ -30,6 +32,7 @@ public sealed class MainActivity : Activity, ISensorEventListener
     ThermalListener? thermal;
     SensorManager? sensors;
     long lastSensor;
+    int Dp(float value) => (int)Math.Ceiling(value * (Resources?.DisplayMetrics?.Density ?? 1));
     public RenderProfile Profile => thermalLimited ? RenderProfile.Legacy : Enum.TryParse<RenderProfile>(prefs.GetString("profile", "Balanced"), out var p) ? p : RenderProfile.Balanced;
     protected override void OnCreate(Bundle? state)
     {
@@ -37,7 +40,38 @@ public sealed class MainActivity : Activity, ISensorEventListener
         prefs = GetSharedPreferences("chudlink", FileCreationMode.Private)!;
         if (!prefs.Contains("id")) prefs.Edit()!.PutString("id", Guid.NewGuid().ToString("N"))!.Commit();
         Window!.SetSoftInputMode(SoftInput.AdjustResize);
-        if (prefs.Contains("token")) ShowDashboard(); else ShowConnection();
+        if (!HandleUsbIntent(Intent)) { if (prefs.Contains("token")) ShowDashboard(); else ShowConnection(); }
+    }
+    protected override void OnNewIntent(Intent? intent)
+    {
+        base.OnNewIntent(intent); Intent = intent;
+        HandleUsbIntent(intent);
+    }
+    bool HandleUsbIntent(Intent? intent)
+    {
+        var fingerprint = intent?.GetStringExtra("chudlink.usbFingerprint");
+        var code = intent?.GetStringExtra("chudlink.usbCode");
+        var lan = intent?.GetStringExtra("chudlink.lanAddress");
+        intent?.RemoveExtra("chudlink.usbFingerprint"); intent?.RemoveExtra("chudlink.usbCode"); intent?.RemoveExtra("chudlink.lanAddress");
+        if (fingerprint == null || code == null || code.Length != 64 || !code.All(Uri.IsHexDigit)) return false;
+        try { using var check = new PhoneConnection("usb", Wire.UsbAddress, fingerprint, ""); fingerprint = check.Fingerprint; }
+        catch (Exception) { return false; }
+        string? fallback = null;
+        try { if (!string.IsNullOrWhiteSpace(lan) && !new Uri(PhoneConnection.NormalizeAddress(lan)).IsLoopback) fallback = PhoneConnection.NormalizeAddress(lan); } catch (Exception) { }
+        if (prefs.Contains("token") && fingerprint == prefs.GetString("fingerprint", ""))
+        {
+            prefs.Edit()!.PutString("address", Wire.UsbAddress)!.Apply();
+            if (fallback != null) prefs.Edit()!.PutString("lanAddress", fallback)!.Apply();
+            if (!dashboardVisible) ShowDashboard(); StartConnection(); return true;
+        }
+        ShowConnection(); var ct = setup!.Token;
+        new AlertDialog.Builder(this)!.SetTitle("Connect to this PC over USB?")!
+            .SetMessage("Confirm this fingerprint matches ChudLink on your PC:\n\n" + fingerprint + "\n\n" + (prefs.Contains("token") ? "This replaces your saved PC after you approve the connection." : "Approve this phone on the PC once. Future USB connections are automatic."))!
+            .SetPositiveButton("Connect", async (_, _) =>
+            {
+                await PairAndConnectAsync(Wire.UsbAddress, fingerprint, code, ct, fallback);
+            })!.SetNegativeButton("Cancel", (_, _) => { })!.Show();
+        return true;
     }
     protected override void OnResume()
     {
@@ -56,78 +90,118 @@ public sealed class MainActivity : Activity, ISensorEventListener
         if (OperatingSystem.IsAndroidVersionAtLeast(29) && thermal != null) power?.RemoveThermalStatusListener(thermal);
         base.OnPause();
     }
-    protected override void OnDestroy() { lifetime.Cancel(); session?.Cancel(); connection?.Dispose(); view?.Dispose(); base.OnDestroy(); }
+    protected override void OnDestroy() { lifetime.Cancel(); setup?.Cancel(); session?.Cancel(); connection?.Dispose(); base.OnDestroy(); }
     public override void OnConfigurationChanged(global::Android.Content.Res.Configuration configuration) { base.OnConfigurationChanged(configuration); view?.Invalidate(); }
     LinearLayout Shell(bool scroll = false)
     {
         var layout = new LinearLayout(this) { Orientation = Orientation.Vertical }; layout.SetBackgroundColor(Color.Rgb(10, 14, 11));
-        layout.SetPadding(24, 24, 24, 16);
-        if (scroll) { var scroller = new ScrollView(this) { FillViewport = true }; scroller.SetBackgroundColor(Color.Rgb(10, 14, 11)); scroller.AddView(layout); SetContentView(scroller); } else SetContentView(layout);
+        layout.SetPadding(Dp(20), Dp(20), Dp(20), Dp(16));
+        var safe = new SafeAreaFrame(this);
+        if (scroll) { var scroller = new ScrollView(this) { FillViewport = true }; scroller.SetBackgroundColor(Color.Rgb(10, 14, 11)); scroller.AddView(layout); safe.AddView(scroller); } else safe.AddView(layout);
+        SetContentView(safe); safe.RequestApplyInsets();
+        // Android can still deliver queued native callbacks after SetContentView. Let its peer
+        // lifetime machinery release the detached view rather than disposing a live JNI peer.
+        view = null;
         return root = layout;
     }
     TextView Text(string text, float size = 16, string color = "#DCE8DE")
     {
-        var t = new TextView(this) { Text = text, TextSize = size }; t.SetTextColor(Color.ParseColor(color)); t.SetPadding(0, 8, 0, 12); return t;
+        var t = new TextView(this) { Text = text, TextSize = size }; t.SetTextColor(Color.ParseColor(color)); t.SetPadding(0, Dp(8), 0, Dp(12)); return t;
     }
-    EditText Entry(string hint, string value = "")
+    EditText Entry(string hint, string value = "", LinearLayout? parent = null)
     {
         var edit = new EditText(this) { Hint = hint, Text = value, TextSize = 15 }; edit.SetSingleLine(true);
-        edit.SetTextColor(Color.White); edit.SetHintTextColor(Color.Rgb(110, 128, 116)); root.AddView(edit); return edit;
+        edit.SetTextColor(Color.White); edit.SetHintTextColor(Color.Rgb(110, 128, 116)); (parent ?? root).AddView(edit); return edit;
     }
     Button Button(string title, Action click)
     {
         var b = new Button(this) { Text = title, TextSize = 14 }; b.SetTextColor(Color.ParseColor("#C6FF2E"));
-        b.SetBackgroundColor(Color.ParseColor("#1C2A1F")); var lp = new LinearLayout.LayoutParams(-1, -2) { TopMargin = 12 }; root.AddView(b, lp); b.Click += (_, _) => click(); return b;
+        b.SetBackgroundColor(Color.ParseColor("#1C2A1F")); var lp = new LinearLayout.LayoutParams(-1, -2) { TopMargin = Dp(12) }; root.AddView(b, lp); b.Click += (_, _) => click(); return b;
     }
     void ShowConnection()
     {
+        setup?.Cancel(); setup?.Dispose(); setup = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); var ct = setup.Token;
         dashboardVisible = false; session?.Cancel(); connection?.Dispose(); sensors?.UnregisterListener(this);
         Shell(true);
         var brand = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-        var mark = new ImageView(this); mark.SetImageResource(Resource.Drawable.chudlink_mark); brand.AddView(mark, new LinearLayout.LayoutParams(64, 64)); brand.AddView(Text("CHUDLINK", 30, "#C6FF2E")); root.AddView(brand);
-        var family = new LinearLayout(this) { Orientation = Orientation.Horizontal }; var familyMark = new ImageView(this); familyMark.SetImageResource(Resource.Drawable.chudgpt_mark); family.AddView(familyMark, new LinearLayout.LayoutParams(28, 28)); family.AddView(Text("  A ChudGPT app · By ChudAI · 0.1.0 Alpha", 12)); root.AddView(family);
-        root.AddView(Text("Connect to your PC", 24));
-        var address = Entry("PC IP address, e.g. 192.168.1.20", prefs.GetString("address", "")!);
-        var fingerprint = Entry("PC SHA-256 fingerprint", prefs.GetString("fingerprint", "")!);
+        var mark = new ImageView(this); mark.SetImageResource(Resource.Drawable.chudlink_mark); brand.AddView(mark, new LinearLayout.LayoutParams(Dp(48), Dp(48))); brand.AddView(Text("CHUDLINK", 30, "#C6FF2E")); root.AddView(brand);
+        var family = new LinearLayout(this) { Orientation = Orientation.Horizontal }; var familyMark = new ImageView(this); familyMark.SetImageResource(Resource.Drawable.chudgpt_mark); family.AddView(familyMark, new LinearLayout.LayoutParams(28, 28)); family.AddView(Text("  A ChudGPT app · By ChudAI · 0.1.1 Alpha", 12)); root.AddView(family);
+        root.AddView(Text("Let's connect", 26));
+        root.AddView(Text("USB: click Connect by USB in the PC app, plug in a data cable, and allow this PC on your phone.\n\nWi-Fi: open ChudLink on your PC and choose Start host. We'll find it here.", 14, "#97A79B"));
+        var hosts = new LinearLayout(this) { Orientation = Orientation.Vertical }; root.AddView(hosts);
+        var code = Entry("Enter the 6-digit code from your PC"); code.InputType = global::Android.Text.InputTypes.ClassNumber; code.SetFilters([new global::Android.Text.InputFilterLengthFilter(6)]);
+        status = Text("Looking for your PC…", 13); root.AddView(status);
+        var advanced = new LinearLayout(this) { Orientation = Orientation.Vertical, Visibility = ViewStates.Gone };
+        var address = Entry("PC IP address, e.g. 192.168.1.20", prefs.GetString("lanAddress", prefs.GetString("address", ""))!, advanced);
+        var fingerprint = Entry("PC SHA-256 fingerprint", prefs.GetString("fingerprint", "")!, advanced);
         fingerprint.SetSingleLine(false); fingerprint.SetMaxLines(3);
-        var code = Entry("6-digit pairing code"); code.InputType = global::Android.Text.InputTypes.ClassNumber;
-        root.AddView(Text("Compare the entire fingerprint with the PC before pairing. Discovery is a suggestion; verify its identity.", 13, "#97A79B"));
-        status = Text("Same private Wi-Fi or LAN as your PC", 13); root.AddView(status);
-        Button("DISCOVER LOCAL HOSTS", async () =>
+        var pair = Button("CONNECT TO PC", () =>
         {
-            try
-            {
-                status.Text = "Searching…"; var found = await PhoneConnection.DiscoverAsync(lifetime.Token);
-                if (found.Length == 0) { status.Text = "No hosts found. Enter the PC address manually."; return; }
-                new AlertDialog.Builder(this)!.SetTitle("Select host · verify fingerprint")!.SetItems(found.Select(f => f.Name + " · " + f.Address).ToArray(), (_, e) => { address.Text = found[e.Which].Address; fingerprint.Text = found[e.Which].Fingerprint; })!.Show();
-                status.Text = "Verify fingerprint against the desktop";
-            }
-            catch (Exception ex) { status.Text = ex.Message; }
+            if (pairing) return;
+            if (code.Text?.Length != 6) { status.Text = "Enter the 6-digit code shown on the PC's Devices page."; return; }
+            try { using var check = new PhoneConnection("check", address.Text ?? "", fingerprint.Text ?? "", ""); }
+            catch (Exception) { advanced.Visibility = ViewStates.Visible; status.Text = "Choose a PC below, or enter its details in Manual connection."; return; }
+            new AlertDialog.Builder(this)!.SetTitle("Confirm your PC")!.SetMessage("Compare this fingerprint with Devices in the PC app:\n\n" + fingerprint.Text)!
+                .SetPositiveButton("It matches · Connect", async (_, _) => await PairAndConnectAsync(address.Text ?? "", fingerprint.Text ?? "", code.Text ?? "", ct))!
+                .SetNegativeButton("Cancel", (_, _) => { })!.Show();
         });
-        var pair = Button("PAIR WITH PC", () => { });
-        pair.Click += async (_, _) =>
+        async Task FindHostsAsync()
         {
-            pair.Enabled = false;
+            if (ct.IsCancellationRequested || pairing) return;
             try
             {
-                using var candidate = new PhoneConnection(prefs.GetString("id", "")!, address.Text ?? "", fingerprint.Text ?? "", "");
-                candidate.Status += s => RunOnUiThread(() => status.Text = s);
-                var token = await candidate.PairAsync(code.Text ?? "", Build.Model ?? "Android", "Android " + Build.VERSION.Release, lifetime.Token);
-                prefs.Edit()!.PutString("address", candidate.Address)!.PutString("fingerprint", candidate.Fingerprint)!.PutString("token", token)!.Commit();
-                ShowDashboard(); StartConnection();
+                status.Text = "Looking for your PC…"; var found = await PhoneConnection.DiscoverAsync(ct);
+                if (ct.IsCancellationRequested || pairing) return;
+                hosts.RemoveAllViews();
+                if (found.Length == 0) { status.Text = "No PC found yet. Start the PC host on the same Wi-Fi, try USB, or open Manual connection."; return; }
+                void Select(DiscoveryReply host) { address.Text = host.Address; fingerprint.Text = host.Fingerprint; status.Text = host.Name + " selected · enter the PC's pairing code above."; }
+                foreach (var host in found)
+                {
+                    var choice = new Button(this) { Text = "PC · " + host.Name + "\n" + host.Address }; choice.SetTextColor(Color.ParseColor("#C6FF2E"));
+                    choice.Click += (_, _) => Select(host); hosts.AddView(choice);
+                }
+                if (found.Length == 1) Select(found[0]); else status.Text = "Choose your PC, then enter its pairing code.";
             }
-            catch (Exception ex) { status.Text = ex.Message; }
-            finally { pair.Enabled = true; }
-        };
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            catch (Exception) { if (!ct.IsCancellationRequested) status.Text = "Couldn't search this network. Try USB or Manual connection."; }
+        }
+        Button("FIND MY PC AGAIN", async () => await FindHostsAsync());
+        Button("MANUAL CONNECTION", () => advanced.Visibility = advanced.Visibility == ViewStates.Visible ? ViewStates.Gone : ViewStates.Visible);
+        root.AddView(advanced);
+        Button("CONNECTION GUIDE · WI-FI & USB", ShowConnectionHelp);
         Button("PHONE SETTINGS", ShowSettings);
+        _ = FindHostsAsync();
+    }
+    async Task PairAndConnectAsync(string address, string fingerprint, string code, CancellationToken ct, string? fallback = null)
+    {
+        if (pairing || ct.IsCancellationRequested) return;
+        pairing = true;
+        try
+        {
+            using var candidate = new PhoneConnection(prefs.GetString("id", "")!, address, fingerprint, "");
+            candidate.Status += s => RunOnUiThread(() => { if (!ct.IsCancellationRequested) status.Text = s; });
+            status.Text = "Connecting… Then approve this phone on your PC.";
+            var token = await candidate.PairAsync(code, Build.Model ?? "Android", "Android " + Build.VERSION.Release, ct);
+            ct.ThrowIfCancellationRequested();
+            var saved = prefs.Edit()!.PutString("address", candidate.Address)!.PutString("fingerprint", candidate.Fingerprint)!.PutString("token", token)!;
+            if (!new Uri(candidate.Address).IsLoopback) saved.PutString("lanAddress", candidate.Address);
+            else if (fallback != null) saved.PutString("lanAddress", fallback);
+            else saved.Remove("lanAddress");
+            saved.Commit(); ShowDashboard(); StartConnection();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) { if (!ct.IsCancellationRequested) status.Text = ex.Message + " For USB, click Retry USB on the PC."; }
+        finally { pairing = false; }
     }
     void ShowDashboard()
     {
+        setup?.Cancel();
         dashboardVisible = true; Shell(); root.SetPadding(0, 0, 0, 0);
-        var bar = new LinearLayout(this) { Orientation = Orientation.Horizontal }; bar.SetPadding(16, 4, 12, 4);
-        status = Text("CHUDLINK · CONNECTING", 11, "#C6FF2E"); bar.AddView(status, new LinearLayout.LayoutParams(0, -2, 1));
-        var settings = new Button(this) { Text = "☰", TextSize = 18 }; settings.SetTextColor(Color.ParseColor("#C6FF2E")); settings.SetBackgroundColor(Color.Transparent); settings.Click += (_, _) => ShowSettings(); bar.AddView(settings, new LinearLayout.LayoutParams(56, 48)); root.AddView(bar);
-        view = new DashboardView(this, Profile);
+        var bar = new LinearLayout(this) { Orientation = Orientation.Horizontal }; bar.SetGravity(GravityFlags.CenterVertical); bar.SetPadding(Dp(16), Dp(4), Dp(8), Dp(4));
+        status = Text("CHUDLINK · CONNECTING", 14, "#C6FF2E"); status.Gravity = GravityFlags.CenterVertical; status.SetPadding(0, Dp(6), Dp(8), Dp(6)); status.SetMinHeight(Dp(48)); status.SetMaxLines(3); status.Ellipsize = global::Android.Text.TextUtils.TruncateAt.End;
+        bar.AddView(status, new LinearLayout.LayoutParams(0, -2, 1));
+        var settings = new Button(this) { Text = "☰", TextSize = 22, ContentDescription = "Phone settings" }; settings.SetPadding(0, 0, 0, 0); settings.SetMinWidth(0); settings.SetMinimumWidth(0); settings.SetTextColor(Color.ParseColor("#C6FF2E")); settings.SetBackgroundColor(Color.Transparent); settings.Click += (_, _) => ShowSettings(); bar.AddView(settings, new LinearLayout.LayoutParams(Dp(48), Dp(48))); root.AddView(bar);
+        view = new DashboardView(this, Profile, prefs.GetBoolean("autofit", true));
         view.TouchAction += touch => _ = SafeSendAsync("touch", touch);
         view.EditRequested += w =>
         {
@@ -151,7 +225,7 @@ public sealed class MainActivity : Activity, ISensorEventListener
         session?.Cancel(); connection?.Dispose(); session = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         try
         {
-            connection = new(prefs.GetString("id", "")!, prefs.GetString("address", "")!, prefs.GetString("fingerprint", "")!, prefs.GetString("token", "")!);
+            connection = new(prefs.GetString("id", "")!, prefs.GetString("address", "")!, prefs.GetString("fingerprint", "")!, prefs.GetString("token", "")!, [prefs.GetString("lanAddress", "")!]);
             connection.Status += s => RunOnUiThread(() => { if (dashboardVisible) status.Text = s; });
             connection.Message += e => RunOnUiThread(() =>
             {
@@ -176,7 +250,7 @@ public sealed class MainActivity : Activity, ISensorEventListener
         using var battery = RegisterReceiver(null, new IntentFilter(Intent.ActionBatteryChanged));
         var level = battery?.GetIntExtra(BatteryManager.ExtraLevel, -1) ?? -1;
         var scale = battery?.GetIntExtra(BatteryManager.ExtraScale, 100) ?? 100;
-        return new(Build.Model ?? "Android", "Android " + Build.VERSION.Release, "0.1.0-alpha", level < 0 ? -1 : level * 100 / Math.Max(1, scale), Resources!.Configuration!.Orientation.ToString(), ["canvas", "touch", "accelerometer", "brightness"], Profile);
+        return new(Build.Model ?? "Android", "Android " + Build.VERSION.Release, Wire.AppVersion, level < 0 ? -1 : level * 100 / Math.Max(1, scale), Resources!.Configuration!.Orientation.ToString(), ["canvas", "touch", "accelerometer", "brightness"], Profile);
     }
     async Task SafeSendAsync<T>(string type, T payload) { try { if (connection != null) await connection.SendAsync(type, payload, session?.Token ?? default); } catch (Exception) { } }
     void ApplyDisplay()
@@ -193,8 +267,12 @@ public sealed class MainActivity : Activity, ISensorEventListener
     }
     void ShowSettings()
     {
+        setup?.Cancel();
         dashboardVisible = false; session?.Cancel(); connection?.Dispose(); sensors?.UnregisterListener(this); Shell(true);
         root.AddView(Text("Phone settings", 28, "#C6FF2E")); root.AddView(Text($"{Build.Manufacturer} {Build.Model}\nAndroid {Build.VERSION.Release} · API {(int)Build.VERSION.SdkInt}\n{(connection?.Received ?? 0) / 1024.0:F1} KB received · {(connection?.Sent ?? 0) / 1024.0:F1} KB sent", 14));
+        Button("CONNECTION GUIDE · WI-FI & USB", ShowConnectionHelp);
+        var fit = new Switch(this) { Text = "Fit dashboard controls to this screen", Checked = prefs.GetBoolean("autofit", true) }; root.AddView(fit); fit.CheckedChange += (_, e) => prefs.Edit()!.PutBoolean("autofit", e.IsChecked)!.Apply();
+        root.AddView(Text("Fits readable cards to your screen. Swipe up or down for more controls. Turn off to use the original Designer canvas.", 14));
         var awake = new Switch(this) { Text = "Keep screen awake", Checked = prefs.GetBoolean("awake", true) }; root.AddView(awake); awake.CheckedChange += (_, e) => prefs.Edit()!.PutBoolean("awake", e.IsChecked)!.Apply();
         var sensor = new Switch(this) { Text = "Share accelerometer (host permission required)", Checked = prefs.GetBoolean("sensor", false) }; root.AddView(sensor); sensor.CheckedChange += (_, e) => prefs.Edit()!.PutBoolean("sensor", e.IsChecked)!.Apply();
         root.AddView(Text("Rendering profile", 16));
@@ -203,6 +281,37 @@ public sealed class MainActivity : Activity, ISensorEventListener
         brightness.ProgressChanged += (_, e) => { prefs.Edit()!.PutInt("brightness", Math.Max(5, e.Progress))!.Apply(); ApplyDisplay(); };
         Button(prefs.Contains("token") ? "BACK TO DASHBOARD" : "BACK TO CONNECTION", () => { if (prefs.Contains("token")) { ShowDashboard(); StartConnection(); ConfigureSensors(); } else ShowConnection(); });
         if (prefs.Contains("token")) Button("FORGET THIS HOST", () => { prefs.Edit()!.Remove("token")!.Commit(); ShowConnection(); });
+    }
+    void ShowConnectionHelp()
+    {
+        dashboardVisible = false; setup?.Cancel(); session?.Cancel(); connection?.Dispose(); sensors?.UnregisterListener(this); Shell(true);
+        root.AddView(Text("Connection guide", 28, "#C6FF2E"));
+        void Steps(string heading, params string[] steps)
+        {
+            root.AddView(Text(heading, 23, "#C6FF2E"));
+            for (var i = 0; i < steps.Length; i++) root.AddView(Text($"{i + 1}. {steps[i]}", 15));
+        }
+        Steps("Connect by USB",
+            "Install the latest ChudLink APK on this phone. On the PC, open ChudLink > Devices > Connect by USB.",
+            "On this phone, open Settings > About phone > Build number (sometimes under Software information). Tap Build number seven times to enable Developer options.",
+            "Open Settings > Developer options and turn on USB debugging. This alpha's USB mode needs it; Wi-Fi pairing works without it.",
+            "Plug in a USB data cable and unlock the phone. Tap Allow when Android asks to allow USB debugging from your PC.",
+            "ChudLink opens automatically. Compare the fingerprint with Devices on your PC and tap Connect. Approve selected phone on the PC once.",
+            "Next time, leave the PC app running and plug in the cable. The app opens and reconnects automatically. No Wi-Fi or address entry needed.");
+        Steps("Connect over Wi-Fi",
+            "Open ChudLink on your PC. It starts the host automatically. Open Devices to see the six-digit code.",
+            "Use the same home Wi-Fi or reachable local network on both devices.",
+            "Return to Let's connect. Your PC is found automatically. Tap it if several PCs appear and enter the six-digit code.",
+            "Compare the fingerprint with your PC, confirm it matches, then approve the phone in the PC's Devices page.",
+            "Your dashboard appears. Next time, open ChudLink and it reconnects automatically.");
+        Steps("If it won't connect",
+            "No PC found: on the PC, click Devices > Allow Wi-Fi connection, approve the Windows administrator prompt, and tap Find my PC again here. Guest networks, VPNs, or router isolation can block local connections.",
+            "Connection refused: make sure the PC host is active and use its Phone connection address. Do not enter 127.0.0.1 for a Wi-Fi connection; that address is used automatically for USB only.",
+            "USB not detected: unlock the phone, check USB debugging and its Allow prompt, try another data cable or port, and click Retry USB on the PC. Some phones need their maker's Android USB driver.",
+            "Expired code: generate a new Wi-Fi code on the PC. For USB, click Retry USB. Approve the phone before the two-minute request expires.",
+            "Changed or revoked PC: open Phone settings > Forget this host and pair again. Compare the new fingerprint with your own PC.");
+        Button(prefs.Contains("token") ? "BACK TO DASHBOARD" : "BACK TO CONNECTION", () => { if (prefs.Contains("token")) { ShowDashboard(); StartConnection(); } else ShowConnection(); });
+        Button("PHONE SETTINGS", ShowSettings);
     }
     void ConfigureSensors()
     {

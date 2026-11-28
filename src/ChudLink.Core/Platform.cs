@@ -49,6 +49,8 @@ public sealed class HostSettings
     public string Address { get; set; } = "";
     public int Port { get; set; } = Wire.Port;
     public bool PersonalEdition { get; set; }
+    public bool UsbAutoConnect { get; set; }
+    public bool AutoStartHost { get; set; } = true;
     public List<ApprovedAction> Actions { get; set; } = [];
     public List<ContextRule> ContextRules { get; set; } = [];
     public List<ServiceEndpoint> Endpoints { get; set; } = [];
